@@ -1,87 +1,53 @@
 // ============================================================
-// Carga inicial: lê a planilha exportada da nonStop e envia os
-// imóveis para a função /seed do seu site Netlify (uma única vez).
+// Receptor de webhooks da nonStop.
+// URL: https://SEU-SITE.netlify.app/.netlify/functions/webhook?secret=SEU_SEGREDO
 //
-// PRÉ-REQUISITOS (na sua máquina):
-//   npm install xlsx
-//
-// USO:
-//   node scripts/seed_from_xlsx.mjs ./imoveis.xlsx https://SEU-SITE.netlify.app SEU_WEBHOOK_SECRET
-//
-// Depois disso, os webhooks mantêm a base viva sozinhos.
+// Autenticação flexível: aceita o segredo/token em qualquer um destes lugares
+// (a nonStop pode enviar de formas diferentes):
+//   - query:   ?secret=...  ou  ?token=...
+//   - header:  x-webhook-secret / x-webhook-token / authorization (Bearer)
+//   - body:    { token: ... } ou { secret: ... }
+// Todos comparados com a env WEBHOOK_SECRET.
 // ============================================================
-import xlsx from "xlsx";
+import { getStore } from "@netlify/blobs";
+import { normalize } from "./_shared.mjs";
 
-const [, , file, siteUrl, secret] = process.argv;
-if (!file || !siteUrl || !secret) {
-  console.error("\nUso: node scripts/seed_from_xlsx.mjs <planilha.xlsx> <https://site.netlify.app> <WEBHOOK_SECRET>\n");
-  process.exit(1);
-}
+export default async (req) => {
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
-const num = (v) => { if (v === null || v === undefined || v === "" || v === "-") return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
-const clean = (v) => (v === null || v === undefined ? "" : String(v).trim());
-const splitFeats = (v) => clean(v).split("|").map((x) => x.trim()).filter((x) => x && x !== "-");
+  // lê o corpo primeiro (para poder checar token no body também)
+  let body;
+  try { body = await req.json(); } catch { body = {}; }
 
-function tipoGrp(t) {
-  t = clean(t).toUpperCase();
-  if (t.includes("APARTAMENTO") || t === "FLAT") return "Apartamento";
-  if (t.includes("STUDIO") || t.includes("LOFT") || t.includes("KITNET")) return "Studio/Kitnet";
-  if (t.includes("COBERTURA") || t.includes("DUPLEX") || t.includes("TRIPLEX")) return "Cobertura/Duplex";
-  if (t.includes("CASA") || t.includes("SOBRADO")) return "Casa/Sobrado";
-  if (t.includes("CONJUNTO") || t.includes("LAJE") || t.includes("LAGE") || t.includes("LOJA") || t.includes("GALPAO") || t.includes("COMERCIAL") || t.includes("EDIFICIO")) return "Comercial";
-  if (t.includes("TERRENO")) return "Terreno";
-  return "Outro";
-}
-const STATUS_MAP = { SEM_OBSERVACOES: "Disponível", VENDIDO: "Vendido", EM_NEGOCIACAO: "Em negociação" };
+  const url = new URL(req.url);
+  const auth = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  const candidates = [
+    url.searchParams.get("secret"),
+    url.searchParams.get("token"),
+    req.headers.get("x-webhook-secret"),
+    req.headers.get("x-webhook-token"),
+    auth,
+    body && (body.token || body.secret),
+  ].filter(Boolean);
 
-// mapeia uma linha da planilha -> registro normalizado (mesmo shape do _shared.normalize)
-function rowToRecord(r) {
-  const id = clean(r["Código"]) || null;
-  const slug = clean(r["Slug Gestor"]);
-  const link = clean(r["Link nonstop"]) || (slug && id ? `https://www.usenonstop.com/imoveis/${slug}/${id}` : "");
-  return {
-    id,
-    bairro: clean(r["Bairro"]),
-    cidade: clean(r["Cidade"]),
-    tipoRaw: clean(r["Tipo"]),
-    tipoG: tipoGrp(r["Tipo"]),
-    status: STATUS_MAP[clean(r["Status"])] || null,
-    valorVenda: num(r["Valor venda"]),
-    area: num(r["Área privativa"]),
-    quartos: num(r["Quartos"]),
-    vagas: num(r["Vagas"]),
-    suites: num(r["Suítes"]),
-    banheiros: num(r["Banheiros"]),
-    cond: num(r["Valor condomínio"]),
-    endereco: clean(r["Endereço"]) + (clean(r["Número"]) && clean(r["Número"]) !== "-" ? ", " + clean(r["Número"]) : ""),
-    gestor: clean(r["Nome Gestor"]),
-    link,
-    desc: clean(r["Descrição"]).slice(0, 160),
-    feats: splitFeats(r["Características"]),
-    condoFeats: splitFeats(r["Características condomínio"]),
-    createdAt: r["Data de criação"] || null,
-  };
-}
+  const SECRET = process.env.WEBHOOK_SECRET;
+  if (!SECRET || !candidates.includes(SECRET)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
 
-const wb = xlsx.readFile(file);
-const ws = wb.Sheets[wb.SheetNames[0]];
-const rows = xlsx.utils.sheet_to_json(ws, { defval: "" });
-const records = rows.map(rowToRecord).filter((r) => r.id);
-console.log(`Lidos ${records.length} imóveis da planilha.`);
-
-const endpoint = `${siteUrl.replace(/\/$/, "")}/.netlify/functions/seed?secret=${encodeURIComponent(secret)}`;
-const BATCH = 300;
-let sent = 0;
-for (let i = 0; i < records.length; i += BATCH) {
-  const chunk = records.slice(i, i + BATCH);
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ records: chunk }),
-  });
-  const j = await res.json().catch(() => ({}));
-  if (!res.ok) { console.error("Erro no lote:", res.status, j); process.exit(1); }
-  sent += j.saved || 0;
-  console.log(`Lote ${i / BATCH + 1}: +${j.saved} (total ${sent})`);
-}
-console.log(`\n✅ Seed concluído: ${sent} imóveis enviados. A partir de agora os webhooks mantêm tudo atualizado.`);
+  const store = getStore("imoveis");
+  const event = body.event;
+  try {
+    if (event === "property:delete" || event === "publication:delete") {
+      const id = body.propertyId;
+      if (id) await store.delete(id);
+      return Response.json({ ok: true, event, deleted: id });
+    }
+    const rec = normalize(body.property);
+    if (!rec || !rec.id) return new Response("No property id", { status: 400 });
+    await store.setJSON(rec.id, rec);
+    return Response.json({ ok: true, event, saved: rec.id });
+  } catch (e) {
+    return new Response("Error: " + e.message, { status: 500 });
+  }
+};
