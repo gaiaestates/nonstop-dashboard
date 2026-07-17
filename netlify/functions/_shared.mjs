@@ -40,6 +40,7 @@ export function normalize(p) {
   const link = p.url || (slug && base36Id ? `https://www.usenonstop.com/imoveis/${slug}/${base36Id}` : "");
   const feats = Array.isArray(p.features) ? p.features : (p.features ? [p.features] : []);
   const condoFeats = p.condo && Array.isArray(p.condo.features) ? p.condo.features : [];
+  const foto = (p.media && Array.isArray(p.media.images) && p.media.images[0] && p.media.images[0].url) || p.image || null;
   return {
     id: base36Id, bairro: clean(addr.area), cidade: clean(addr.city),
     tipoRaw: clean(p.type), tipoG: tipoGrp(p.type),
@@ -49,7 +50,7 @@ export function normalize(p) {
     cond: num(values.condoFee),
     endereco: clean(addr.street) + (clean(addr.number) && clean(addr.number) !== "-" ? ", " + clean(addr.number) : ""),
     gestor: clean(user.name), link, desc: clean(p.description).slice(0, 160),
-    feats, condoFeats, createdAt: p.createdAt || null,
+    feats, condoFeats, foto, createdAt: p.createdAt || null,
   };
 }
 
