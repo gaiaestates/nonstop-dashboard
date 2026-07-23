@@ -34,6 +34,22 @@ function info(rec) {
     preco: rec.valorVenda, statusImovel: rec.status, link: rec.link, foto: rec.foto } : {};
 }
 
+// O e-mail diário deve refletir só o recorte do gaiaestates.com.br (mesmos
+// pisos usados lá: SITE_MIN_VALUE e SITE_MIN_PRICE_PER_SQM), não o universo
+// completo do usesquare. A base "imoveis" (usada por outras análises) segue
+// guardando tudo — só o log de eventos que vira email é filtrado aqui.
+function passesGaiaFloor(rec) {
+  if (!rec) return false;
+  const minVal = Number(process.env.SITE_MIN_VALUE);
+  if (Number.isFinite(minVal) && !(rec.valorVenda >= minVal)) return false;
+  const minPPS = Number(process.env.SITE_MIN_PRICE_PER_SQM);
+  if (Number.isFinite(minPPS)) {
+    if (!rec.area || rec.valorVenda == null) return false;
+    if (!(rec.valorVenda / rec.area >= minPPS)) return false;
+  }
+  return true;
+}
+
 export default async (req) => {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   let body;
@@ -64,7 +80,7 @@ export default async (req) => {
       const id = body.propertyId;
       let old = null;
       if (id) { old = await store.get(id, { type: "json" }).catch(() => null); await store.delete(id); }
-      await logEvent({ tipo: "saiu", ...info(old), id: id || (old && old.id) });
+      if (passesGaiaFloor(old)) await logEvent({ tipo: "saiu", ...info(old), id: id || (old && old.id) });
       return Response.json({ ok: true, event, deleted: id });
     }
 
@@ -74,10 +90,10 @@ export default async (req) => {
     await store.setJSON(rec.id, rec);
 
     if (event === "publication:create" || !old) {
-      await logEvent({ tipo: "entrou", ...info(rec) });
+      if (passesGaiaFloor(rec)) await logEvent({ tipo: "entrou", ...info(rec) });
     } else if (event === "property:update") {
       const changes = diff(old, rec);
-      if (changes.length) await logEvent({ tipo: "atualizou", ...info(rec), changes });
+      if (changes.length && passesGaiaFloor(rec)) await logEvent({ tipo: "atualizou", ...info(rec), changes });
     }
     return Response.json({ ok: true, event, saved: rec.id });
   } catch (e) {
